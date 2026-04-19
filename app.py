@@ -3,9 +3,9 @@ import os, tempfile, json, boto3
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from vocal import analyze_vocal
-from drums import analyze_drums
-from interplay import analyze_interplay
+from analyzers.vocal import analyze_vocal
+from analyzers.drums import analyze_drums
+from analyzers.interplay import analyze_interplay
 
 app = FastAPI(title="RhythmForge")
 
