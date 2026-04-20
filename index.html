@@ -737,12 +737,33 @@ function drawTimeline(tl) {
   });
 }
 
-// ── postMessage receiver from StemForge ───────────────────────────
+// ── postMessage receiver from StemForge (strict origin validation) ──
 window.addEventListener('message', (e) => {
+  const allowedOrigins = [
+    'https://stemforge.buildwhilebleeding.com', // Production
+    'http://localhost:5173',                    // Local Dev
+    'http://127.0.0.1:5173'
+  ];
+
+  if (!allowedOrigins.includes(e.origin)) {
+    console.warn(`[Security] Dropped unauthorized postMessage from: ${e.origin}`);
+    return;
+  }
+
   if (e.data?.type !== 'RHYTHMFORGE_RESULT') return;
-  document.getElementById('incomingBadge').classList.add('visible');
-  document.getElementById('uploadZone').style.display = 'none';
-  renderResults(e.data.data);
+
+  try {
+    const payload = e.data.payload ?? e.data.data;
+    if (!payload || !payload.vocal || !payload.drums || !payload.interplay) {
+      throw new Error('Malformed payload structure');
+    }
+
+    document.getElementById('incomingBadge').classList.add('visible');
+    document.getElementById('uploadZone').style.display = 'none';
+    renderResults(payload);
+  } catch (error) {
+    console.error('[RhythmForge] Payload parsing failed:', error);
+  }
 });
 
 // ── Resize redraw ──────────────────────────────────────────────────

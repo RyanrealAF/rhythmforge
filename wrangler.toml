@@ -1,0 +1,8 @@
+name = "rhythmforge-frontend"
+compatibility_date = "2024-04-19"
+pages_build_output_dir = "./"
+
+# ENTRY POINT: Bind KV if we decide to cache analysis results at the edge
+# [[kv_namespaces]]
+# binding = "ANALYSIS_CACHE"
+# id = "YOUR_KV_NAMESPACE_ID"
