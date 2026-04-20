@@ -9,6 +9,10 @@
     pkgs.python311
     pkgs.python311Packages.pip
     pkgs.python311Packages.uvicorn
+    pkgs.ffmpeg
+    pkgs.libsndfile1
+    pkgs.git
+    pkgs.docker
   ];
 
   # Sets environment variables in the workspace
@@ -24,7 +28,7 @@
       enable = true;
       previews = {
         rhythmforge = {
-          command = ["uvicorn" "app:app" "--host" "0.0.0.0" "--port" "$PORT"];
+          command = ["docker" "run" "--rm" "-p" "$PORT:8000" "rhythmforge"};
           manager = "web";
           label = "RhythmForge";
         };
@@ -35,11 +39,11 @@
     workspace = {
       # Runs when a workspace is first created
       onCreate = {
-        install-deps = "pip install -r requirements.txt";
+        install-deps = "python3.11 -m pip install -r requirements.txt";
       };
       # Runs when the workspace is (re)started
       onStart = {
-        start-server = "uvicorn app:app --host 0.0.0.0 --port $PORT";
+        build-docker-image = "docker build -t rhythmforge .";
       };
     };
   };
