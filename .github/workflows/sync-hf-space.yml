@@ -2,7 +2,11 @@ name: Sync to Hugging Face Space
 
 on:
   push:
+<<<<<<< HEAD
     branches: [main]
+=======
+    branches: [work]
+>>>>>>> origin/codex/task-title-nbhtt1
   workflow_dispatch:
 
 jobs:
@@ -11,8 +15,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+<<<<<<< HEAD
         with:
           fetch-depth: 0
+=======
+>>>>>>> origin/codex/task-title-nbhtt1
 
       - name: Configure git identity
         run: |
@@ -24,12 +31,23 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_ID: ${{ secrets.HF_SPACE_ID }}
         run: |
+<<<<<<< HEAD
           if [ -z "$HF_TOKEN" ] || [ -z "$HF_SPACE_ID" ]; then
+=======
+          set -euo pipefail
+
+          if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_SPACE_ID:-}" ]; then
+>>>>>>> origin/codex/task-title-nbhtt1
             echo "Missing required secrets: HF_TOKEN and/or HF_SPACE_ID"
             exit 1
           fi
 
+<<<<<<< HEAD
           HF_URL="https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}"
+=======
+          # Use the OAuth username expected by Hugging Face git over HTTPS.
+          HF_URL="https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_ID}"
+>>>>>>> origin/codex/task-title-nbhtt1
           rm -rf /tmp/hf-space
           git clone "$HF_URL" /tmp/hf-space
 
@@ -39,11 +57,21 @@ jobs:
             ./ /tmp/hf-space/
 
           cd /tmp/hf-space
+<<<<<<< HEAD
           git add -A
+=======
+          git lfs install --local
+          git add -A
+
+>>>>>>> origin/codex/task-title-nbhtt1
           if git diff --cached --quiet; then
             echo "No changes to sync"
             exit 0
           fi
 
           git commit -m "Sync from GitHub (${GITHUB_SHA})"
+<<<<<<< HEAD
           git push origin main
+=======
+          git push origin HEAD:main
+>>>>>>> origin/codex/task-title-nbhtt1
