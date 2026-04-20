@@ -1,4 +1,4 @@
-dfff# Use a Python 3.10 slim image to keep the footprint low
+# Use a Python 3.10 slim image to keep the footprint low
 FROM python:3.10-slim
 
 # Step 1: System Level Dependencies
