@@ -6,7 +6,7 @@ def analyze_interplay(vocal: dict, drums: dict) -> dict:
     kick_times = drums["patterns"]["kick_times"]
     snare_times = drums["patterns"]["snare_times"]
     beat_times = drums["beat_times"]
-    tempo = drums["tempo"]["bpm"]
+    tempo = max(1.0, float(drums["tempo"]["bpm"]))
     bar_duration = (60.0 / tempo) * 4
 
     # KICK / VOCAL ALIGNMENT

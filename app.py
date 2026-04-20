@@ -16,7 +16,8 @@ logger = logging.getLogger("rhythmforge")
 STARTUP_DIAGNOSTICS = {
     "index_html_found": False,
     "r2_enabled": False,
-    "missing_r2_vars": []
+    "missing_r2_vars": [],
+    "r2_var_sources": {}
 }
 
 app.add_middleware(
@@ -28,11 +29,50 @@ app.add_middleware(
 
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aiff", ".aif"}
 
+
+def _env_first(*names: str) -> tuple[str, str]:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return value, name
+    return "", names[0]
+
+
+def _parse_combined_r2_key(value: str) -> tuple[str, str]:
+    if not value:
+        return "", ""
+    for delim in (":", "|", ","):
+        if delim in value:
+            left, right = value.split(delim, 1)
+            return left.strip(), right.strip()
+    return "", ""
+
+
 # ENTRY POINT: Cloudflare R2 config — set via HF Space secrets
-R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
-R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
-R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
-R2_BUCKET = os.environ.get("R2_BUCKET", "rhythmforge-stems")
+R2_ENDPOINT, R2_ENDPOINT_SOURCE = _env_first("R2_ENDPOINT", "CLOUDFLARE_R2_ENDPOINT")
+R2_ACCESS_KEY, R2_ACCESS_KEY_SOURCE = _env_first("R2_ACCESS_KEY", "R2_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
+R2_SECRET_KEY, R2_SECRET_KEY_SOURCE = _env_first("R2_SECRET_KEY", "R2_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
+
+# Optional convenience format: R2_KEY="<access_key>:<secret_key>"
+# Also supports legacy single-secret usage: R2_key / R2_KEY as secret only.
+R2_COMBINED_KEY, R2_COMBINED_KEY_SOURCE = _env_first("R2_KEY", "R2_key")
+combined_access, combined_secret = _parse_combined_r2_key(R2_COMBINED_KEY)
+if combined_access and combined_secret:
+    if not R2_ACCESS_KEY:
+        R2_ACCESS_KEY = combined_access
+        R2_ACCESS_KEY_SOURCE = f"{R2_COMBINED_KEY_SOURCE}(access)"
+    if not R2_SECRET_KEY:
+        R2_SECRET_KEY = combined_secret
+        R2_SECRET_KEY_SOURCE = f"{R2_COMBINED_KEY_SOURCE}(secret)"
+elif R2_COMBINED_KEY and not R2_SECRET_KEY:
+    R2_SECRET_KEY = R2_COMBINED_KEY
+    R2_SECRET_KEY_SOURCE = R2_COMBINED_KEY_SOURCE
+
+R2_BUCKET, R2_BUCKET_SOURCE = _env_first("R2_BUCKET", "CLOUDFLARE_R2_BUCKET")
+if not R2_BUCKET:
+    R2_BUCKET = "rhythmforge-stems"
+    R2_BUCKET_SOURCE = "default"
+
 USE_R2 = all([R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY])
 
 
@@ -51,6 +91,12 @@ async def startup_checks() -> None:
     STARTUP_DIAGNOSTICS["index_html_found"] = index_exists
     STARTUP_DIAGNOSTICS["r2_enabled"] = USE_R2
     STARTUP_DIAGNOSTICS["missing_r2_vars"] = missing_r2
+    STARTUP_DIAGNOSTICS["r2_var_sources"] = {
+        "endpoint": R2_ENDPOINT_SOURCE,
+        "access_key": R2_ACCESS_KEY_SOURCE,
+        "secret_key": R2_SECRET_KEY_SOURCE,
+        "bucket": R2_BUCKET_SOURCE,
+    }
 
     logger.info(
         "Startup checks: index_html_found=%s r2_enabled=%s",

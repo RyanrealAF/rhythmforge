@@ -1,10 +1,16 @@
 import librosa
 import numpy as np
 import whisper
-import soundfile as sf
-import tempfile, os
 
 _whisper_model = None
+
+
+def _safe_tempo(raw_tempo) -> float:
+    tempo = float(np.atleast_1d(raw_tempo)[0]) if raw_tempo is not None else 0.0
+    if not np.isfinite(tempo) or tempo <= 0:
+        return 120.0
+    return tempo
+
 
 def get_whisper():
     global _whisper_model
@@ -12,21 +18,23 @@ def get_whisper():
         _whisper_model = whisper.load_model("small")
     return _whisper_model
 
+
 def analyze_vocal(audio_path: str) -> dict:
     y, sr = librosa.load(audio_path, sr=None, mono=True)
     duration = librosa.get_duration(y=y, sr=sr)
 
     # TEMPO + BEAT GRID
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = _safe_tempo(tempo_raw)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-    bar_duration = (60.0 / float(tempo)) * 4
+    bar_duration = (60.0 / tempo) * 4
 
     # ONSET DETECTION — proxy for syllable transients
     onset_frames = librosa.onset.onset_detect(y=y, sr=sr, units='frames', backtrack=True)
     onset_times = librosa.frames_to_time(onset_frames, sr=sr)
 
     # SYLLABLE DENSITY PER BAR
-    num_bars = max(1, int(duration / bar_duration))
+    num_bars = max(1, int(duration / bar_duration)) if bar_duration > 0 else 1
     syllables_per_bar = []
     for i in range(num_bars):
         bar_start = i * bar_duration
@@ -72,8 +80,9 @@ def analyze_vocal(audio_path: str) -> dict:
     dry_ratio = round(1.0 - wet_ratio, 2)
 
     # DOUBLE/SHADOW VOCAL — spectral flux anomaly
-    spectral_flux = np.mean(np.diff(S, axis=1) ** 2)
-    shadow_detected = bool(spectral_flux > np.percentile(np.diff(S, axis=1) ** 2, 85))
+    spectral_diff = np.diff(S, axis=1)
+    spectral_flux = np.mean(spectral_diff ** 2)
+    shadow_detected = bool(spectral_flux > np.percentile(spectral_diff ** 2, 85))
 
     # DRUM BLEED — low frequency energy in vocal stem
     low_freq_mask = freqs < 200
@@ -81,22 +90,26 @@ def analyze_vocal(audio_path: str) -> dict:
     bleed_ratio = low_energy / (total_energy + 1e-9)
     drum_bleed = "detected" if bleed_ratio > 0.12 else "clean"
 
-    # WHISPER — word-level timing for syllable accuracy
-    whisper_model = get_whisper()
-    result = whisper_model.transcribe(audio_path, word_timestamps=True, language="en")
+    # WHISPER — word-level timing for syllable accuracy (optional)
     word_timings = []
-    for seg in result.get("segments", []):
-        for w in seg.get("words", []):
-            word_timings.append({
-                "word": w.get("word", "").strip(),
-                "start": round(float(w.get("start", 0)), 2),
-                "end": round(float(w.get("end", 0)), 2)
-            })
+    transcription_status = "ok"
+    try:
+        whisper_model = get_whisper()
+        result = whisper_model.transcribe(audio_path, word_timestamps=True, language="en")
+        for seg in result.get("segments", []):
+            for w in seg.get("words", []):
+                word_timings.append({
+                    "word": w.get("word", "").strip(),
+                    "start": round(float(w.get("start", 0)), 2),
+                    "end": round(float(w.get("end", 0)), 2)
+                })
+    except Exception:
+        transcription_status = "unavailable"
 
     # FLOW PATTERN — triplet vs straight detection via onset spacing
     if len(onset_times) > 3:
         gaps = np.diff(onset_times)
-        beat_unit = 60.0 / float(tempo) / 4
+        beat_unit = 60.0 / tempo / 4
         ratios = gaps / (beat_unit + 1e-9)
         triplet_score = float(np.mean(np.abs(ratios - 1.5) < 0.2))
         double_time_score = float(np.mean(ratios < 0.6))
@@ -119,7 +132,7 @@ def analyze_vocal(audio_path: str) -> dict:
         for ot in onset_times:
             diffs = np.abs(beat_times - ot)
             nearest = float(np.min(diffs))
-            offsets.append(nearest / beat_unit)
+            offsets.append(nearest / (beat_unit + 1e-9))
         mean_offset = float(np.mean(offsets))
         if mean_offset < 0.1:
             placement = "on the beat"
@@ -157,6 +170,7 @@ def analyze_vocal(audio_path: str) -> dict:
             "drum_bleed": drum_bleed
         },
         "word_timings": word_timings,
-        "tempo_bpm": round(float(tempo), 1),
+        "transcription_status": transcription_status,
+        "tempo_bpm": round(tempo, 1),
         "duration_seconds": round(duration, 2)
     }

@@ -1,12 +1,20 @@
 import librosa
 import numpy as np
 
+
+def _safe_tempo(raw_tempo) -> float:
+    tempo = float(np.atleast_1d(raw_tempo)[0]) if raw_tempo is not None else 0.0
+    if not np.isfinite(tempo) or tempo <= 0:
+        return 120.0
+    return tempo
+
 def analyze_drums(audio_path: str) -> dict:
     y, sr = librosa.load(audio_path, sr=None, mono=True)
     duration = librosa.get_duration(y=y, sr=sr)
 
     # TEMPO
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = _safe_tempo(tempo_raw)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
     # GROOVE — swing detection via beat subdivision spacing
