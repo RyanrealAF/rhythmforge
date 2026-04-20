@@ -11,7 +11,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -c "import whisper; whisper.load_model('small')"
+# NOTE: Do not pre-download Whisper during image build (often fails in HF builders).
+# Model downloads lazily on first request at runtime.
 
 COPY . .
 

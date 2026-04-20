@@ -1,0 +1,494 @@
+diff --git a/Dockerfile b/Dockerfile
+index e656aaecf150b849ebb03f8b133a357b22f44bcd..027646222de6e0306c1ec061c4e3204979e9cdb5 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,20 +1,21 @@
+ FROM python:3.10-slim
+ 
+ RUN apt-get update && apt-get install -y \
+     ffmpeg \
+     libsndfile1 \
+     git \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ WORKDIR /app
+ 
+ COPY requirements.txt .
+ RUN pip install --no-cache-dir -r requirements.txt
+ 
+-RUN python -c "import whisper; whisper.load_model('small')"
++# NOTE: Do not pre-download Whisper during image build (often fails in HF builders).
++# Model downloads lazily on first request at runtime.
+ 
+ COPY . .
+ 
+ EXPOSE 7860
+ 
+ CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+diff --git a/README.md b/README.md
+index bdf5c1901956e0e86e796fba0ed05f5c4c26f7b1..20e654c5e0b3932af76eff0185487a64367a75d9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,30 +1,35 @@
+ ---
+ title: RhythmForge
+ emoji: 🥁
+ colorFrom: purple
+ colorTo: blue
+ sdk: docker
+ app_port: 7860
+ pinned: false
+ ---
+ 
+ # RhythmForge (Hugging Face Space)
+ 
+ This Space runs the RhythmForge FastAPI app using the included `Dockerfile`.
+ 
+ ## Runtime
+ 
+ - Entry server: `uvicorn app:app --host 0.0.0.0 --port 7860`
+ - UI route: `/` (served from `index.html`)
+ - Health route: `/health` (includes startup diagnostics for `index.html` presence and R2 env completeness)
+ 
+ ## Required secrets (optional for R2 integration)
+ 
+ Set these in **Space Settings → Variables and secrets** if you want Cloudflare R2 uploads:
+ 
+-- `R2_ENDPOINT`
+-- `R2_ACCESS_KEY`
+-- `R2_SECRET_KEY`
+-- `R2_BUCKET` (optional, defaults to `rhythmforge-stems`)
++- Endpoint: `R2_ENDPOINT` *(or `CLOUDFLARE_R2_ENDPOINT`)*
++- Access key: `R2_ACCESS_KEY` *(or `R2_ACCESS_KEY_ID` / `AWS_ACCESS_KEY_ID`)*
++- Secret key: `R2_SECRET_KEY` *(or `R2_SECRET_ACCESS_KEY` / `AWS_SECRET_ACCESS_KEY` / `R2_key` / `R2_KEY`)*
++- Optional combined key format: `R2_KEY="<access_key>:<secret_key>"`
++- Bucket: `R2_BUCKET` *(or `CLOUDFLARE_R2_BUCKET`; optional, defaults to `rhythmforge-stems`)*
+ 
+ If these are not set, the app still runs with local temp-file processing.
++
++## Notes for Hugging Face builds
++
++The Docker image intentionally does **not** pre-download Whisper during build. Whisper is downloaded lazily at runtime on the first vocal-analysis request to avoid HF builder failures caused by external model fetches during image build.
+diff --git a/app.py b/app.py
+index c0d8b1b30732524072ee423af312d5e1cb4f617c..205bc06e76fd43287ff79f215f3ca852437739a7 100644
+--- a/app.py
++++ b/app.py
+@@ -1,78 +1,124 @@
+ import os
+ import tempfile
+ import logging
+ 
+ import boto3
+ from fastapi import FastAPI, File, HTTPException, UploadFile
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import HTMLResponse, JSONResponse
+ from vocal import analyze_vocal
+ from drums import analyze_drums
+ from interplay import analyze_interplay
+ 
+ app = FastAPI(title="RhythmForge")
+ logger = logging.getLogger("rhythmforge")
+ 
+ STARTUP_DIAGNOSTICS = {
+     "index_html_found": False,
+     "r2_enabled": False,
+-    "missing_r2_vars": []
++    "missing_r2_vars": [],
++    "r2_var_sources": {}
+ }
+ 
+ app.add_middleware(
+     CORSMiddleware,
+     allow_origins=["*"],
+     allow_methods=["*"],
+     allow_headers=["*"]
+ )
+ 
+ ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aiff", ".aif"}
+ 
++
++def _env_first(*names: str) -> tuple[str, str]:
++    for name in names:
++        value = os.environ.get(name, "")
++        if value:
++            return value, name
++    return "", names[0]
++
++
++def _parse_combined_r2_key(value: str) -> tuple[str, str]:
++    if not value:
++        return "", ""
++    for delim in (":", "|", ","):
++        if delim in value:
++            left, right = value.split(delim, 1)
++            return left.strip(), right.strip()
++    return "", ""
++
++
+ # ENTRY POINT: Cloudflare R2 config — set via HF Space secrets
+-R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
+-R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
+-R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
+-R2_BUCKET = os.environ.get("R2_BUCKET", "rhythmforge-stems")
++R2_ENDPOINT, R2_ENDPOINT_SOURCE = _env_first("R2_ENDPOINT", "CLOUDFLARE_R2_ENDPOINT")
++R2_ACCESS_KEY, R2_ACCESS_KEY_SOURCE = _env_first("R2_ACCESS_KEY", "R2_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
++R2_SECRET_KEY, R2_SECRET_KEY_SOURCE = _env_first("R2_SECRET_KEY", "R2_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
++
++# Optional convenience format: R2_KEY="<access_key>:<secret_key>"
++# Also supports legacy single-secret usage: R2_key / R2_KEY as secret only.
++R2_COMBINED_KEY, R2_COMBINED_KEY_SOURCE = _env_first("R2_KEY", "R2_key")
++combined_access, combined_secret = _parse_combined_r2_key(R2_COMBINED_KEY)
++if combined_access and combined_secret:
++    if not R2_ACCESS_KEY:
++        R2_ACCESS_KEY = combined_access
++        R2_ACCESS_KEY_SOURCE = f"{R2_COMBINED_KEY_SOURCE}(access)"
++    if not R2_SECRET_KEY:
++        R2_SECRET_KEY = combined_secret
++        R2_SECRET_KEY_SOURCE = f"{R2_COMBINED_KEY_SOURCE}(secret)"
++elif R2_COMBINED_KEY and not R2_SECRET_KEY:
++    R2_SECRET_KEY = R2_COMBINED_KEY
++    R2_SECRET_KEY_SOURCE = R2_COMBINED_KEY_SOURCE
++
++R2_BUCKET, R2_BUCKET_SOURCE = _env_first("R2_BUCKET", "CLOUDFLARE_R2_BUCKET")
++if not R2_BUCKET:
++    R2_BUCKET = "rhythmforge-stems"
++    R2_BUCKET_SOURCE = "default"
++
+ USE_R2 = all([R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY])
+ 
+ 
+ @app.on_event("startup")
+ async def startup_checks() -> None:
+     html_path = os.path.join(os.path.dirname(__file__), "index.html")
+     index_exists = os.path.exists(html_path)
+ 
+     required_r2_vars = {
+         "R2_ENDPOINT": bool(R2_ENDPOINT),
+         "R2_ACCESS_KEY": bool(R2_ACCESS_KEY),
+         "R2_SECRET_KEY": bool(R2_SECRET_KEY),
+     }
+     missing_r2 = [name for name, present in required_r2_vars.items() if not present]
+ 
+     STARTUP_DIAGNOSTICS["index_html_found"] = index_exists
+     STARTUP_DIAGNOSTICS["r2_enabled"] = USE_R2
+     STARTUP_DIAGNOSTICS["missing_r2_vars"] = missing_r2
++    STARTUP_DIAGNOSTICS["r2_var_sources"] = {
++        "endpoint": R2_ENDPOINT_SOURCE,
++        "access_key": R2_ACCESS_KEY_SOURCE,
++        "secret_key": R2_SECRET_KEY_SOURCE,
++        "bucket": R2_BUCKET_SOURCE,
++    }
+ 
+     logger.info(
+         "Startup checks: index_html_found=%s r2_enabled=%s",
+         index_exists,
+         USE_R2
+     )
+     if missing_r2:
+         logger.info("Optional R2 vars missing (expected unless R2 enabled): %s", ", ".join(missing_r2))
+ 
+ 
+ def get_r2():
+     if not USE_R2:
+         return None
+     return boto3.client(
+         "s3",
+         endpoint_url=R2_ENDPOINT,
+         aws_access_key_id=R2_ACCESS_KEY,
+         aws_secret_access_key=R2_SECRET_KEY,
+         region_name="auto"
+     )
+ 
+ 
+ def validate_audio_upload(upload: UploadFile) -> None:
+     ext = os.path.splitext(upload.filename or "")[1].lower()
+     if ext not in ALLOWED_AUDIO_EXTENSIONS:
+diff --git a/drums.py b/drums.py
+index c620a44e57c002824e09fc1dc16e18dbe0ce5c58..cffa7dde2b6bc5398e2f108c20a593c647e6e327 100644
+--- a/drums.py
++++ b/drums.py
+@@ -1,34 +1,42 @@
+ import librosa
+ import numpy as np
+ 
++
++def _safe_tempo(raw_tempo) -> float:
++    tempo = float(np.atleast_1d(raw_tempo)[0]) if raw_tempo is not None else 0.0
++    if not np.isfinite(tempo) or tempo <= 0:
++        return 120.0
++    return tempo
++
+ def analyze_drums(audio_path: str) -> dict:
+     y, sr = librosa.load(audio_path, sr=None, mono=True)
+     duration = librosa.get_duration(y=y, sr=sr)
+ 
+     # TEMPO
+-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
++    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
++    tempo = _safe_tempo(tempo_raw)
+     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+ 
+     # GROOVE — swing detection via beat subdivision spacing
+     if len(beat_times) > 3:
+         sub_onset_frames = librosa.onset.onset_detect(y=y, sr=sr, units='frames')
+         sub_times = librosa.frames_to_time(sub_onset_frames, sr=sr)
+         beat_unit = 60.0 / float(tempo)
+         subdivisions = []
+         for bt in beat_times[:-1]:
+             in_beat = sub_times[(sub_times >= bt) & (sub_times < bt + beat_unit)]
+             if len(in_beat) >= 2:
+                 gaps = np.diff(in_beat)
+                 if len(gaps) > 0:
+                     subdivisions.append(float(gaps[0] / (beat_unit + 1e-9)))
+         if subdivisions:
+             avg_sub = float(np.mean(subdivisions))
+             swing_heavy = avg_sub > 0.58
+             groove_type = "swung 16ths" if swing_heavy else "straight 16ths"
+             swing_ratio = f"{round(avg_sub * 100)}/{round((1 - avg_sub) * 100)}"
+         else:
+             groove_type = "straight 16ths"
+             swing_ratio = "50/50"
+     else:
+         groove_type = "straight 16ths"
+         swing_ratio = "50/50"
+diff --git a/interplay.py b/interplay.py
+index f8191370cdfff4241bdd79de903ce2e8c0e48ee4..1601ef851e24d369c3d1457b15ff9647860b8fc8 100644
+--- a/interplay.py
++++ b/interplay.py
+@@ -1,34 +1,34 @@
+ import numpy as np
+ from typing import List
+ 
+ def analyze_interplay(vocal: dict, drums: dict) -> dict:
+     vocal_emphasis = vocal["delivery"]["emphasis_times"]
+     kick_times = drums["patterns"]["kick_times"]
+     snare_times = drums["patterns"]["snare_times"]
+     beat_times = drums["beat_times"]
+-    tempo = drums["tempo"]["bpm"]
++    tempo = max(1.0, float(drums["tempo"]["bpm"]))
+     bar_duration = (60.0 / tempo) * 4
+ 
+     # KICK / VOCAL ALIGNMENT
+     on_kick, between_kicks, floating = 0, 0, 0
+     for vt in vocal_emphasis:
+         kick_dists = [abs(vt - kt) for kt in kick_times] if kick_times else [999]
+         nearest_kick = min(kick_dists)
+         beat_unit = 60.0 / tempo
+         if nearest_kick < beat_unit * 0.12:
+             on_kick += 1
+         elif nearest_kick < beat_unit * 0.5:
+             between_kicks += 1
+         else:
+             floating += 1
+ 
+     total_em = max(1, on_kick + between_kicks + floating)
+     kick_alignment = {
+         "on_kick_pct": round(on_kick / total_em * 100),
+         "between_kicks_pct": round(between_kicks / total_em * 100),
+         "floating_pct": round(floating / total_em * 100)
+     }
+ 
+     # SNARE RELATIONSHIP
+     snare_lock_count = 0
+     displaced_bars = set()
+diff --git a/vocal.py b/vocal.py
+index 67dd324fef050087dac28488d9ea3aeda364c26f..597d230e82f51cf6710a295d329163dab0b00cfe 100644
+--- a/vocal.py
++++ b/vocal.py
+@@ -1,162 +1,176 @@
+ import librosa
+ import numpy as np
+ import whisper
+-import soundfile as sf
+-import tempfile, os
+ 
+ _whisper_model = None
+ 
++
++def _safe_tempo(raw_tempo) -> float:
++    tempo = float(np.atleast_1d(raw_tempo)[0]) if raw_tempo is not None else 0.0
++    if not np.isfinite(tempo) or tempo <= 0:
++        return 120.0
++    return tempo
++
++
+ def get_whisper():
+     global _whisper_model
+     if _whisper_model is None:
+         _whisper_model = whisper.load_model("small")
+     return _whisper_model
+ 
++
+ def analyze_vocal(audio_path: str) -> dict:
+     y, sr = librosa.load(audio_path, sr=None, mono=True)
+     duration = librosa.get_duration(y=y, sr=sr)
+ 
+     # TEMPO + BEAT GRID
+-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
++    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
++    tempo = _safe_tempo(tempo_raw)
+     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+-    bar_duration = (60.0 / float(tempo)) * 4
++    bar_duration = (60.0 / tempo) * 4
+ 
+     # ONSET DETECTION — proxy for syllable transients
+     onset_frames = librosa.onset.onset_detect(y=y, sr=sr, units='frames', backtrack=True)
+     onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+ 
+     # SYLLABLE DENSITY PER BAR
+-    num_bars = max(1, int(duration / bar_duration))
++    num_bars = max(1, int(duration / bar_duration)) if bar_duration > 0 else 1
+     syllables_per_bar = []
+     for i in range(num_bars):
+         bar_start = i * bar_duration
+         bar_end = bar_start + bar_duration
+         count = int(np.sum((onset_times >= bar_start) & (onset_times < bar_end)))
+         syllables_per_bar.append(count)
+ 
+     avg_density = float(np.mean(syllables_per_bar)) if syllables_per_bar else 0
+     peak_density = int(np.max(syllables_per_bar)) if syllables_per_bar else 0
+ 
+     # EMPHASIS — top 20% onset strength events
+     onset_strength = librosa.onset.onset_strength(y=y, sr=sr)
+     strength_at_onsets = onset_strength[onset_frames] if len(onset_frames) > 0 else np.array([])
+     threshold = float(np.percentile(strength_at_onsets, 80)) if len(strength_at_onsets) > 0 else 0
+     emphasis_frames = onset_frames[strength_at_onsets >= threshold] if len(strength_at_onsets) > 0 else []
+     emphasis_times = librosa.frames_to_time(emphasis_frames, sr=sr).tolist()
+ 
+     # BREATH DETECTION — low energy regions between phrases
+     rms = librosa.feature.rms(y=y)[0]
+     rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
+     silence_threshold = float(np.percentile(rms, 15))
+     breath_regions = []
+     in_silence = False
+     silence_start = 0.0
+     for t, r in zip(rms_times, rms):
+         if r < silence_threshold and not in_silence:
+             in_silence = True
+             silence_start = float(t)
+         elif r >= silence_threshold and in_silence:
+             in_silence = False
+             duration_s = float(t) - silence_start
+             if 0.1 < duration_s < 0.8:
+                 breath_regions.append(round(silence_start, 2))
+     breath_points = breath_regions[:12]
+ 
+     # DRY/WET RATIO — high-freq tail energy as reverb proxy
+     S = np.abs(librosa.stft(y))
+     freqs = librosa.fft_frequencies(sr=sr)
+     high_freq_mask = freqs > 4000
+     total_energy = float(np.mean(S))
+     tail_energy = float(np.mean(S[high_freq_mask, :])) if np.any(high_freq_mask) else 0
+     wet_ratio = min(0.45, round(tail_energy / (total_energy + 1e-9), 2))
+     dry_ratio = round(1.0 - wet_ratio, 2)
+ 
+     # DOUBLE/SHADOW VOCAL — spectral flux anomaly
+-    spectral_flux = np.mean(np.diff(S, axis=1) ** 2)
+-    shadow_detected = bool(spectral_flux > np.percentile(np.diff(S, axis=1) ** 2, 85))
++    spectral_diff = np.diff(S, axis=1)
++    spectral_flux = np.mean(spectral_diff ** 2)
++    shadow_detected = bool(spectral_flux > np.percentile(spectral_diff ** 2, 85))
+ 
+     # DRUM BLEED — low frequency energy in vocal stem
+     low_freq_mask = freqs < 200
+     low_energy = float(np.mean(S[low_freq_mask, :])) if np.any(low_freq_mask) else 0
+     bleed_ratio = low_energy / (total_energy + 1e-9)
+     drum_bleed = "detected" if bleed_ratio > 0.12 else "clean"
+ 
+-    # WHISPER — word-level timing for syllable accuracy
+-    whisper_model = get_whisper()
+-    result = whisper_model.transcribe(audio_path, word_timestamps=True, language="en")
++    # WHISPER — word-level timing for syllable accuracy (optional)
+     word_timings = []
+-    for seg in result.get("segments", []):
+-        for w in seg.get("words", []):
+-            word_timings.append({
+-                "word": w.get("word", "").strip(),
+-                "start": round(float(w.get("start", 0)), 2),
+-                "end": round(float(w.get("end", 0)), 2)
+-            })
++    transcription_status = "ok"
++    try:
++        whisper_model = get_whisper()
++        result = whisper_model.transcribe(audio_path, word_timestamps=True, language="en")
++        for seg in result.get("segments", []):
++            for w in seg.get("words", []):
++                word_timings.append({
++                    "word": w.get("word", "").strip(),
++                    "start": round(float(w.get("start", 0)), 2),
++                    "end": round(float(w.get("end", 0)), 2)
++                })
++    except Exception:
++        transcription_status = "unavailable"
+ 
+     # FLOW PATTERN — triplet vs straight detection via onset spacing
+     if len(onset_times) > 3:
+         gaps = np.diff(onset_times)
+-        beat_unit = 60.0 / float(tempo) / 4
++        beat_unit = 60.0 / tempo / 4
+         ratios = gaps / (beat_unit + 1e-9)
+         triplet_score = float(np.mean(np.abs(ratios - 1.5) < 0.2))
+         double_time_score = float(np.mean(ratios < 0.6))
+         syncopated_score = float(np.mean((ratios > 0.6) & (ratios < 0.9)))
+         if double_time_score > 0.3:
+             flow_pattern = "double-time sections"
+         elif triplet_score > 0.25:
+             flow_pattern = "triplet-based"
+         elif syncopated_score > 0.3:
+             flow_pattern = "syncopated 16ths"
+         else:
+             flow_pattern = "straight 16ths"
+     else:
+         flow_pattern = "insufficient data"
+ 
+     # RHYTHMIC PLACEMENT vs beat grid
+     if len(beat_times) > 1 and len(onset_times) > 0:
+         beat_unit = float(np.mean(np.diff(beat_times)))
+         offsets = []
+         for ot in onset_times:
+             diffs = np.abs(beat_times - ot)
+             nearest = float(np.min(diffs))
+-            offsets.append(nearest / beat_unit)
++            offsets.append(nearest / (beat_unit + 1e-9))
+         mean_offset = float(np.mean(offsets))
+         if mean_offset < 0.1:
+             placement = "on the beat"
+         elif mean_offset < 0.2:
+             placement = "in pocket"
+         else:
+             placement = "behind the beat"
+     else:
+         placement = "unknown"
+ 
+     double_time_bars = int(np.sum(np.array(syllables_per_bar) > avg_density * 1.6))
+ 
+     return {
+         "flow": {
+             "pattern": flow_pattern,
+             "placement": placement,
+             "double_time_bar_count": double_time_bars
+         },
+         "syllable_density": {
+             "avg_per_bar": round(avg_density, 1),
+             "peak_bar": peak_density,
+             "per_bar": syllables_per_bar
+         },
+         "delivery": {
+             "emphasis_hit_count": len(emphasis_times),
+             "emphasis_times": [round(t, 2) for t in emphasis_times[:20]],
+             "breath_point_count": len(breath_points),
+             "breath_times": breath_points,
+             "shadow_vocal_detected": shadow_detected,
+             "double_time_bar_count": double_time_bars
+         },
+         "signal": {
+             "dry_ratio": dry_ratio,
+             "wet_ratio": wet_ratio,
+             "drum_bleed": drum_bleed
+         },
+         "word_timings": word_timings,
+-        "tempo_bpm": round(float(tempo), 1),
++        "transcription_status": transcription_status,
++        "tempo_bpm": round(tempo, 1),
+         "duration_seconds": round(duration, 2)
+     }

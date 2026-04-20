@@ -22,9 +22,14 @@ This Space runs the RhythmForge FastAPI app using the included `Dockerfile`.
 
 Set these in **Space Settings → Variables and secrets** if you want Cloudflare R2 uploads:
 
-- `R2_ENDPOINT`
-- `R2_ACCESS_KEY`
-- `R2_SECRET_KEY`
-- `R2_BUCKET` (optional, defaults to `rhythmforge-stems`)
+- Endpoint: `R2_ENDPOINT` *(or `CLOUDFLARE_R2_ENDPOINT`)*
+- Access key: `R2_ACCESS_KEY` *(or `R2_ACCESS_KEY_ID` / `AWS_ACCESS_KEY_ID`)*
+- Secret key: `R2_SECRET_KEY` *(or `R2_SECRET_ACCESS_KEY` / `AWS_SECRET_ACCESS_KEY` / `R2_key` / `R2_KEY`)*
+- Optional combined key format: `R2_KEY="<access_key>:<secret_key>"`
+- Bucket: `R2_BUCKET` *(or `CLOUDFLARE_R2_BUCKET`; optional, defaults to `rhythmforge-stems`)*
 
 If these are not set, the app still runs with local temp-file processing.
+
+## Notes for Hugging Face builds
+
+The Docker image intentionally does **not** pre-download Whisper during build. Whisper is downloaded lazily at runtime on the first vocal-analysis request to avoid HF builder failures caused by external model fetches during image build.
