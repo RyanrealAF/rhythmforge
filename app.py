@@ -1,6 +1,6 @@
-# ENTRY POINT: RhythmForge FastAPI backend
 import os
 import tempfile
+import logging
 
 import boto3
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -11,6 +11,13 @@ from drums import analyze_drums
 from interplay import analyze_interplay
 
 app = FastAPI(title="RhythmForge")
+logger = logging.getLogger("rhythmforge")
+
+STARTUP_DIAGNOSTICS = {
+    "index_html_found": False,
+    "r2_enabled": False,
+    "missing_r2_vars": []
+}
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +34,31 @@ R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
 R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
 R2_BUCKET = os.environ.get("R2_BUCKET", "rhythmforge-stems")
 USE_R2 = all([R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY])
+
+
+@app.on_event("startup")
+async def startup_checks() -> None:
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    index_exists = os.path.exists(html_path)
+
+    required_r2_vars = {
+        "R2_ENDPOINT": bool(R2_ENDPOINT),
+        "R2_ACCESS_KEY": bool(R2_ACCESS_KEY),
+        "R2_SECRET_KEY": bool(R2_SECRET_KEY),
+    }
+    missing_r2 = [name for name, present in required_r2_vars.items() if not present]
+
+    STARTUP_DIAGNOSTICS["index_html_found"] = index_exists
+    STARTUP_DIAGNOSTICS["r2_enabled"] = USE_R2
+    STARTUP_DIAGNOSTICS["missing_r2_vars"] = missing_r2
+
+    logger.info(
+        "Startup checks: index_html_found=%s r2_enabled=%s",
+        index_exists,
+        USE_R2
+    )
+    if missing_r2:
+        logger.info("Optional R2 vars missing (expected unless R2 enabled): %s", ", ".join(missing_r2))
 
 
 def get_r2():
@@ -76,7 +108,11 @@ async def serve_ui():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "r2_enabled": USE_R2}
+    return {
+        "status": "ok",
+        "r2_enabled": USE_R2,
+        "startup": STARTUP_DIAGNOSTICS
+    }
 
 
 @app.post("/analyze/vocal")
