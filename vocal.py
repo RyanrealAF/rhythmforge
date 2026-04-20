@@ -1,6 +1,5 @@
 import librosa
 import numpy as np
-import whisper
 
 _whisper_model = None
 
@@ -15,7 +14,11 @@ def _safe_tempo(raw_tempo) -> float:
 def get_whisper():
     global _whisper_model
     if _whisper_model is None:
-        _whisper_model = whisper.load_model("small")
+        try:
+            import whisper
+            _whisper_model = whisper.load_model("small")
+        except Exception:
+            _whisper_model = False
     return _whisper_model
 
 
@@ -95,6 +98,8 @@ def analyze_vocal(audio_path: str) -> dict:
     transcription_status = "ok"
     try:
         whisper_model = get_whisper()
+        if not whisper_model:
+            raise RuntimeError("whisper_unavailable")
         result = whisper_model.transcribe(audio_path, word_timestamps=True, language="en")
         for seg in result.get("segments", []):
             for w in seg.get("words", []):

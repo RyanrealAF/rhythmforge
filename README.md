@@ -32,4 +32,4 @@ If these are not set, the app still runs with local temp-file processing.
 
 ## Notes for Hugging Face builds
 
-The Docker image intentionally does **not** pre-download Whisper during build. Whisper is downloaded lazily at runtime on the first vocal-analysis request to avoid HF builder failures caused by external model fetches during image build.
+The Docker image intentionally avoids Whisper installation/download during build to keep HF builds stable and lightweight. Vocal analysis still runs if Whisper is unavailable, and returns `transcription_status: "unavailable"` instead of failing the request.
