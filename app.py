@@ -5,11 +5,7 @@ import tempfile
 import boto3
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-<<<<<<< HEAD
-=======
 from fastapi.responses import HTMLResponse, JSONResponse
-
->>>>>>> origin/codex/task-title-nbhtt1
 from vocal import analyze_vocal
 from drums import analyze_drums
 from interplay import analyze_interplay
